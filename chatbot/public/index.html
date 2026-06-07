@@ -4,8 +4,8 @@
         <meta charset="UTF-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1.0" />
         <title>Gemini Chat</title>
-        <link rel="stylesheet" href="/style.css" />
-        <script defer src="/app.js"></script>
+        <link rel="stylesheet" href="./style.css" />
+        <script defer src="./app.js"></script>
         <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
     </head>
     <body x-data="chatApp()" x-init="init()">
@@ -80,7 +80,7 @@
                 <div class="empty-state" x-show="!activeId && !messages.length">
                     <div class="empty-icon">✦</div>
                     <h3>What can I help you with?</h3>
-                    <p>Start a conversation with Gemini. Your chat history is saved locally in SQLite.</p>
+                    <p>Start a conversation with Gemini. Your chat history is saved locally in your browser.</p>
                     <div class="suggestions">
                         <button class="suggestion" @click="sendMessage('Explain quantum computing simply')">
                             Explain quantum computing
@@ -172,7 +172,7 @@
                         Get a free key at
                         <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
                             >Google AI Studio</a
-                        >. Stored locally in SQLite — never in project files.
+                        >. Stored locally in your browser — never in project files.
                     </p>
                     <div x-show="hasApiKey && maskedKey" class="current-key">
                         Current key: <code x-text="maskedKey"></code>

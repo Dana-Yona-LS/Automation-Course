@@ -1,3 +1,99 @@
+const STORAGE_KEY = "gemini_chatbot_v1";
+const GEMINI_MODELS = [
+    "gemini-3.1-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-flash",
+];
+
+function loadStore() {
+    try {
+        return JSON.parse(localStorage.getItem(STORAGE_KEY)) || emptyStore();
+    } catch {
+        return emptyStore();
+    }
+}
+
+function emptyStore() {
+    return { apiKey: null, conversations: [], messages: {}, nextId: 1 };
+}
+
+function saveStore(store) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(store));
+}
+
+function maskKey(key) {
+    if (!key || key.length < 8) return null;
+    return key.slice(0, 4) + "…" + key.slice(-4);
+}
+
+function now() {
+    return new Date().toISOString();
+}
+
+function autoTitle(text) {
+    const cleaned = text.trim().replace(/\s+/g, " ");
+    return cleaned.length > 48 ? cleaned.slice(0, 48) + "…" : cleaned || "New Chat";
+}
+
+function formatGeminiError(msg) {
+    if (msg.includes("429") || msg.includes("quota") || msg.includes("Quota exceeded")) {
+        const retry = msg.match(/retry in ([\d.]+)s/i)?.[1];
+        return retry
+            ? `Gemini rate limit reached. Wait ${Math.ceil(Number(retry))} seconds and try again.`
+            : "Gemini quota exceeded. Check usage at ai.google.dev or try again later.";
+    }
+    if (msg.includes("404") || msg.includes("NOT_FOUND")) {
+        return "Gemini model not available. Try again later.";
+    }
+    if (msg.includes("API_KEY_INVALID") || msg.includes("API key not valid")) {
+        return "Invalid API key. Update it in Settings.";
+    }
+    if (msg.length > 180) return msg.slice(0, 180) + "…";
+    return msg;
+}
+
+async function askGemini(apiKey, messages, userText) {
+    const contents = messages.map((m) => ({
+        role: m.role === "assistant" ? "model" : "user",
+        parts: [{ text: m.content }],
+    }));
+    contents.push({ role: "user", parts: [{ text: userText }] });
+
+    let lastError = "All Gemini models failed";
+    for (const model of GEMINI_MODELS) {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+        const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ contents }),
+        });
+
+        if (!res.ok) {
+            const body = await res.json().catch(() => ({}));
+            lastError = body.error?.message || `Request failed (${res.status})`;
+            if (res.status === 429 || res.status === 404) continue;
+            throw new Error(formatGeminiError(lastError));
+        }
+
+        const data = await res.json();
+        const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return text;
+        lastError = "Empty response from Gemini";
+    }
+
+    throw new Error(formatGeminiError(lastError));
+}
+
+function downloadJson(filename, data) {
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
 function chatApp() {
     return {
         conversations: [],
@@ -14,12 +110,14 @@ function chatApp() {
         hasApiKey: false,
         savingKey: false,
         chatError: null,
+        useServer: false,
 
         get activeConversation() {
             return this.conversations.find((c) => c.id === this.activeId);
         },
 
         async init() {
+            this.useServer = await this.detectServer();
             await this.checkHealth();
             await this.loadSettings();
             await this.loadConversations();
@@ -28,6 +126,16 @@ function chatApp() {
             }
             if (!this.hasApiKey) {
                 this.settingsOpen = true;
+            }
+        },
+
+        async detectServer() {
+            if (location.hostname.includes("github.io")) return false;
+            try {
+                const res = await fetch("/api/health");
+                return res.ok;
+            } catch {
+                return false;
             }
         },
 
@@ -46,22 +154,32 @@ function chatApp() {
         },
 
         async checkHealth() {
-            try {
-                const data = await this.api("/api/health");
-                this.geminiOk = data.gemini;
-            } catch {
-                this.geminiOk = false;
+            if (this.useServer) {
+                try {
+                    const data = await this.api("/api/health");
+                    this.geminiOk = data.gemini;
+                } catch {
+                    this.geminiOk = false;
+                }
+            } else {
+                this.geminiOk = Boolean(loadStore().apiKey);
             }
         },
 
         async loadSettings() {
-            try {
-                const data = await this.api("/api/settings");
-                this.hasApiKey = data.hasApiKey;
-                this.maskedKey = data.maskedKey;
-            } catch {
-                this.hasApiKey = false;
-                this.maskedKey = null;
+            if (this.useServer) {
+                try {
+                    const data = await this.api("/api/settings");
+                    this.hasApiKey = data.hasApiKey;
+                    this.maskedKey = data.maskedKey;
+                } catch {
+                    this.hasApiKey = false;
+                    this.maskedKey = null;
+                }
+            } else {
+                const store = loadStore();
+                this.hasApiKey = Boolean(store.apiKey);
+                this.maskedKey = maskKey(store.apiKey);
             }
         },
 
@@ -85,12 +203,19 @@ function chatApp() {
 
             this.savingKey = true;
             try {
-                const data = await this.api("/api/settings", {
-                    method: "POST",
-                    body: JSON.stringify({ apiKey }),
-                });
+                if (this.useServer) {
+                    const data = await this.api("/api/settings", {
+                        method: "POST",
+                        body: JSON.stringify({ apiKey }),
+                    });
+                    this.maskedKey = data.maskedKey;
+                } else {
+                    const store = loadStore();
+                    store.apiKey = apiKey;
+                    saveStore(store);
+                    this.maskedKey = maskKey(apiKey);
+                }
                 this.hasApiKey = true;
-                this.maskedKey = data.maskedKey;
                 this.geminiOk = true;
                 this.apiKeyInput = "";
                 this.settingsOpen = false;
@@ -105,7 +230,13 @@ function chatApp() {
         async removeApiKey() {
             if (!confirm("Remove the saved API key?")) return;
             try {
-                await this.api("/api/settings", { method: "DELETE" });
+                if (this.useServer) {
+                    await this.api("/api/settings", { method: "DELETE" });
+                } else {
+                    const store = loadStore();
+                    store.apiKey = null;
+                    saveStore(store);
+                }
                 this.hasApiKey = false;
                 this.maskedKey = null;
                 this.geminiOk = false;
@@ -117,11 +248,37 @@ function chatApp() {
         },
 
         async loadConversations() {
-            this.conversations = await this.api("/api/conversations");
+            if (this.useServer) {
+                this.conversations = await this.api("/api/conversations");
+                return;
+            }
+
+            const store = loadStore();
+            this.conversations = [...store.conversations].sort(
+                (a, b) => new Date(b.updated_at) - new Date(a.updated_at),
+            );
         },
 
         async newChat() {
-            const conv = await this.api("/api/conversations", { method: "POST" });
+            if (this.useServer) {
+                const conv = await this.api("/api/conversations", { method: "POST" });
+                this.conversations.unshift(conv);
+                await this.selectConversation(conv.id);
+                this.sidebarOpen = false;
+                return;
+            }
+
+            const store = loadStore();
+            const ts = now();
+            const conv = {
+                id: store.nextId++,
+                title: "New Chat",
+                created_at: ts,
+                updated_at: ts,
+            };
+            store.conversations.unshift(conv);
+            store.messages[conv.id] = [];
+            saveStore(store);
             this.conversations.unshift(conv);
             await this.selectConversation(conv.id);
             this.sidebarOpen = false;
@@ -129,7 +286,12 @@ function chatApp() {
 
         async selectConversation(id) {
             this.activeId = id;
-            this.messages = await this.api(`/api/conversations/${id}/messages`);
+            if (this.useServer) {
+                this.messages = await this.api(`/api/conversations/${id}/messages`);
+            } else {
+                const store = loadStore();
+                this.messages = store.messages[id] || [];
+            }
             this.sidebarOpen = false;
             this.$nextTick(() => this.scrollToBottom());
         },
@@ -137,7 +299,16 @@ function chatApp() {
         async deleteConversation(id, event) {
             event.stopPropagation();
             if (!confirm("Delete this conversation?")) return;
-            await this.api(`/api/conversations/${id}`, { method: "DELETE" });
+
+            if (this.useServer) {
+                await this.api(`/api/conversations/${id}`, { method: "DELETE" });
+            } else {
+                const store = loadStore();
+                store.conversations = store.conversations.filter((c) => c.id !== id);
+                delete store.messages[id];
+                saveStore(store);
+            }
+
             this.conversations = this.conversations.filter((c) => c.id !== id);
             if (this.activeId === id) {
                 if (this.conversations.length) {
@@ -168,28 +339,44 @@ function chatApp() {
             this.loading = true;
             this.chatError = null;
 
-            const optimistic = {
-                role: "user",
-                content,
-                created_at: new Date().toISOString(),
-            };
-            this.messages.push(optimistic);
+            const ts = now();
+            const userMsg = { role: "user", content, created_at: ts };
+            this.messages.push(userMsg);
             this.$nextTick(() => this.scrollToBottom());
 
             try {
-                const data = await this.api(`/api/conversations/${this.activeId}/messages`, {
-                    method: "POST",
-                    body: JSON.stringify({ content }),
-                });
+                if (this.useServer) {
+                    const data = await this.api(`/api/conversations/${this.activeId}/messages`, {
+                        method: "POST",
+                        body: JSON.stringify({ content }),
+                    });
+                    this.messages[this.messages.length - 1] = data.user;
+                    this.messages.push(data.assistant);
+                } else {
+                    const store = loadStore();
+                    const conv = store.conversations.find((c) => c.id === this.activeId);
+                    const history = store.messages[this.activeId] || [];
 
-                this.messages[this.messages.length - 1] = data.user;
-                this.messages.push(data.assistant);
+                    store.messages[this.activeId] = [...history, userMsg];
+                    if (conv?.title === "New Chat") conv.title = autoTitle(content);
+                    if (conv) conv.updated_at = ts;
+                    saveStore(store);
+
+                    const reply = await askGemini(store.apiKey, history, content);
+                    const assistantMsg = { role: "assistant", content: reply, created_at: now() };
+                    store.messages[this.activeId].push(assistantMsg);
+                    if (conv) conv.updated_at = assistantMsg.created_at;
+                    saveStore(store);
+
+                    this.messages.push(assistantMsg);
+                }
                 await this.loadConversations();
             } catch (err) {
                 this.chatError = err.message;
                 this.toast(err.message, "error", 12000);
-                this.messages = await this.api(`/api/conversations/${this.activeId}/messages`);
-                await this.loadConversations();
+                if (this.useServer) {
+                    this.messages = await this.api(`/api/conversations/${this.activeId}/messages`);
+                }
             } finally {
                 this.loading = false;
                 this.$nextTick(() => this.scrollToBottom());
@@ -222,12 +409,42 @@ function chatApp() {
 
         async exportCurrent() {
             if (!this.activeId) return;
-            window.location.href = `/api/conversations/${this.activeId}/export`;
+
+            if (this.useServer) {
+                window.location.href = `/api/conversations/${this.activeId}/export`;
+            } else {
+                const store = loadStore();
+                const conv = store.conversations.find((c) => c.id === this.activeId);
+                downloadJson(`chat-${this.activeId}.json`, {
+                    version: 1,
+                    exported_at: now(),
+                    conversation: {
+                        title: conv.title,
+                        created_at: conv.created_at,
+                        updated_at: conv.updated_at,
+                        messages: store.messages[this.activeId] || [],
+                    },
+                });
+            }
             this.toast("Exporting conversation…", "success");
         },
 
         async exportAll() {
-            window.location.href = "/api/export";
+            if (this.useServer) {
+                window.location.href = "/api/export";
+            } else {
+                const store = loadStore();
+                downloadJson("chat-history.json", {
+                    version: 1,
+                    exported_at: now(),
+                    conversations: store.conversations.map((c) => ({
+                        title: c.title,
+                        created_at: c.created_at,
+                        updated_at: c.updated_at,
+                        messages: store.messages[c.id] || [],
+                    })),
+                });
+            }
             this.toast("Exporting all chats…", "success");
         },
 
@@ -242,15 +459,46 @@ function chatApp() {
             try {
                 const text = await file.text();
                 const data = JSON.parse(text);
-                const result = await this.api("/api/import", {
-                    method: "POST",
-                    body: JSON.stringify(data),
-                });
-                await this.loadConversations();
-                if (result.conversations?.length) {
-                    await this.selectConversation(result.conversations[0].id);
+
+                if (this.useServer) {
+                    const result = await this.api("/api/import", {
+                        method: "POST",
+                        body: JSON.stringify(data),
+                    });
+                    await this.loadConversations();
+                    if (result.conversations?.length) {
+                        await this.selectConversation(result.conversations[0].id);
+                    }
+                    this.toast(`Imported ${result.imported} conversation(s)`, "success");
+                } else {
+                    const items = data.conversations
+                        ? data.conversations
+                        : data.conversation
+                          ? [data.conversation]
+                          : null;
+                    if (!items?.length) throw new Error("Invalid JSON format");
+
+                    const store = loadStore();
+                    for (const item of items) {
+                        const ts = now();
+                        const id = store.nextId++;
+                        store.conversations.unshift({
+                            id,
+                            title: item.title?.trim() || "Imported Chat",
+                            created_at: item.created_at || ts,
+                            updated_at: item.updated_at || ts,
+                        });
+                        store.messages[id] = (item.messages || []).filter(
+                            (m) => m.content && ["user", "assistant"].includes(m.role),
+                        );
+                    }
+                    saveStore(store);
+                    await this.loadConversations();
+                    if (this.conversations.length) {
+                        await this.selectConversation(this.conversations[0].id);
+                    }
+                    this.toast(`Imported ${items.length} conversation(s)`, "success");
                 }
-                this.toast(`Imported ${result.imported} conversation(s)`, "success");
             } catch (err) {
                 this.toast(err.message || "Import failed", "error");
             }

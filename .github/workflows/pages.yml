@@ -3,6 +3,9 @@ name: Deploy GitHub Pages
 on:
     push:
         branches: [main]
+        paths:
+            - "chatbot/public/**"
+            - ".github/workflows/pages.yml"
     workflow_dispatch:
 
 permissions:
@@ -23,10 +26,11 @@ jobs:
         steps:
             - uses: actions/checkout@v4
 
-            - name: Prepare site
+            - name: Prepare chatbot site
               run: |
                   mkdir _site
-                  cp index.html .nojekyll _site/
+                  cp chatbot/public/* _site/
+                  cp .nojekyll _site/
 
             - uses: actions/configure-pages@v5
 
