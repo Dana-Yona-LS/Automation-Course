@@ -1,0 +1,31 @@
+
+# Dependencies
+node_modules/
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+.playwright-cli/
+.playwright-mcp/
+allure-results/
+
+# Chatbot secrets & local data
+chatbot/node_modules/
+chatbot/data/
+chatbot/.env
+
+# Other project secrets
+weather_agent/.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Large / generated files
+trace.zip
+
+# Editor
+.cursor/

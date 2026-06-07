@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>Gemini Chat</title>
+        <link rel="stylesheet" href="/style.css" />
+        <script defer src="/app.js"></script>
+        <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.14.9/dist/cdn.min.js"></script>
+    </head>
+    <body x-data="chatApp()" x-init="init()">
+        <div class="overlay" :class="{ show: sidebarOpen }" @click="sidebarOpen = false"></div>
+
+        <div class="app">
+            <!-- Sidebar -->
+            <aside class="sidebar" :class="{ open: sidebarOpen }">
+                <div class="sidebar-header">
+                    <div class="logo">
+                        <div class="logo-icon">✦</div>
+                        Gemini Chat
+                    </div>
+                    <button class="btn btn-primary" @click="newChat()">+ New Chat</button>
+                    <div class="sidebar-actions">
+                        <button class="btn btn-sm" @click="exportAll()" title="Export all chats">
+                            ↑ Export All
+                        </button>
+                        <button class="btn btn-sm" @click="triggerImport()" title="Import JSON">
+                            ↓ Import
+                        </button>
+                    </div>
+                </div>
+
+                <div class="conversation-list">
+                    <template x-for="conv in conversations" :key="conv.id">
+                        <div
+                            class="conv-item"
+                            :class="{ active: conv.id === activeId }"
+                            @click="selectConversation(conv.id)"
+                        >
+                            <span class="conv-title" x-text="conv.title"></span>
+                            <button
+                                class="btn btn-ghost btn-sm conv-delete btn-danger"
+                                @click="deleteConversation(conv.id, $event)"
+                                title="Delete"
+                            >
+                                ✕
+                            </button>
+                        </div>
+                    </template>
+                    <div
+                        x-show="!conversations.length"
+                        style="padding: 16px; text-align: center; color: var(--text-muted); font-size: 0.85rem"
+                    >
+                        No conversations yet
+                    </div>
+                </div>
+
+                <div class="sidebar-footer">
+                    <span class="status-dot" :class="{ offline: !geminiOk }"></span>
+                    <span x-text="geminiOk ? 'Gemini connected' : 'API key missing'"></span>
+                    <button class="btn btn-ghost btn-sm settings-btn" @click="openSettings()" title="Settings">
+                        ⚙
+                    </button>
+                </div>
+            </aside>
+
+            <!-- Main -->
+            <main class="main">
+                <header class="chat-header">
+                    <button class="btn btn-ghost menu-toggle" @click="sidebarOpen = true">☰</button>
+                    <h2 x-text="activeConversation?.title || 'Gemini Chat'"></h2>
+                    <div class="header-actions" x-show="activeId">
+                        <button class="btn btn-sm" @click="exportCurrent()" title="Export this chat">
+                            Export
+                        </button>
+                    </div>
+                </header>
+
+                <!-- Empty state -->
+                <div class="empty-state" x-show="!activeId && !messages.length">
+                    <div class="empty-icon">✦</div>
+                    <h3>What can I help you with?</h3>
+                    <p>Start a conversation with Gemini. Your chat history is saved locally in SQLite.</p>
+                    <div class="suggestions">
+                        <button class="suggestion" @click="sendMessage('Explain quantum computing simply')">
+                            Explain quantum computing
+                        </button>
+                        <button class="suggestion" @click="sendMessage('Write a Python function to sort a list')">
+                            Write a Python function
+                        </button>
+                        <button class="suggestion" @click="sendMessage('Give me 5 creative project ideas')">
+                            Creative project ideas
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Messages -->
+                <div class="messages" x-show="messages.length || activeId" x-ref="messages">
+                    <template x-for="(msg, i) in messages" :key="i">
+                        <div class="message" :class="msg.role">
+                            <div class="avatar" x-text="msg.role === 'user' ? 'You' : 'AI'"></div>
+                            <div>
+                                <div class="bubble" x-text="msg.content"></div>
+                                <div class="msg-time" x-text="formatTime(msg.created_at)"></div>
+                            </div>
+                        </div>
+                    </template>
+
+                    <div class="message assistant" x-show="loading">
+                        <div class="avatar">AI</div>
+                        <div class="bubble">
+                            <div class="typing"><span></span><span></span><span></span></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Input -->
+                <div class="input-area">
+                    <div class="chat-error" x-show="chatError" x-cloak>
+                        <span x-text="chatError"></span>
+                        <button class="btn btn-ghost btn-sm" @click="chatError = null">✕</button>
+                    </div>
+                    <div class="input-wrap">
+                        <textarea
+                            x-model="input"
+                            @keydown.enter="onEnter($event)"
+                            @input="autoResize($el)"
+                            placeholder="Message Gemini…"
+                            rows="1"
+                            :disabled="loading"
+                        ></textarea>
+                        <button
+                            class="send-btn"
+                            @click="sendMessage()"
+                            :disabled="loading || !input.trim()"
+                            title="Send (Enter)"
+                        >
+                            ↑
+                        </button>
+                    </div>
+                    <p class="input-hint">Enter to send · Shift+Enter for new line</p>
+                </div>
+            </main>
+        </div>
+
+        <!-- Hidden file input for import -->
+        <input
+            type="file"
+            accept=".json,application/json"
+            class="hidden-input"
+            x-ref="importInput"
+            @change="handleImport($event)"
+        />
+
+        <!-- Toasts -->
+        <div class="toast-container">
+            <template x-for="t in toasts" :key="t.id">
+                <div class="toast" :class="t.type" x-text="t.message"></div>
+            </template>
+        </div>
+
+        <!-- Settings modal -->
+        <div class="modal-overlay" x-show="settingsOpen" x-cloak @click.self="closeSettings()">
+            <div class="modal">
+                <div class="modal-header">
+                    <h3>Settings</h3>
+                    <button class="btn btn-ghost btn-sm" @click="closeSettings()">✕</button>
+                </div>
+                <div class="modal-body">
+                    <label class="field-label">Gemini API Key</label>
+                    <p class="field-hint">
+                        Get a free key at
+                        <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener"
+                            >Google AI Studio</a
+                        >. Stored locally in SQLite — never in project files.
+                    </p>
+                    <div x-show="hasApiKey && maskedKey" class="current-key">
+                        Current key: <code x-text="maskedKey"></code>
+                    </div>
+                    <input
+                        type="password"
+                        class="field-input"
+                        x-model="apiKeyInput"
+                        placeholder="Paste your API key here"
+                        @keydown.enter="saveApiKey()"
+                    />
+                </div>
+                <div class="modal-footer">
+                    <button
+                        class="btn btn-danger btn-sm"
+                        x-show="hasApiKey"
+                        @click="removeApiKey()"
+                    >
+                        Remove key
+                    </button>
+                    <div class="modal-footer-right">
+                        <button class="btn btn-sm" @click="closeSettings()">Cancel</button>
+                        <button
+                            class="btn btn-primary btn-sm"
+                            @click="saveApiKey()"
+                            :disabled="savingKey || !apiKeyInput.trim()"
+                            x-text="savingKey ? 'Saving…' : 'Save key'"
+                        ></button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </body>
+</html>
